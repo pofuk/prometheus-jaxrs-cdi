@@ -1,7 +1,9 @@
 package com.loraneo.prometheus;
 
-
 import java.io.IOException;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Optional;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -54,107 +56,35 @@ import io.prometheus.client.Histogram;
  * @author Andrew Stuart &lt;andrew.stuart2@gmail.com&gt;
  */
 public class PrometheusServletFilter implements Filter {
-    static final String PATH_COMPONENT_PARAM = "path-components";
-    static final String HELP_PARAM = "help";
-    static final String METRIC_NAME_PARAM = "metric-name";
-    static final String BUCKET_CONFIG_PARAM = "buckets";
+
+    private static final double[] DEFAULT_BUCKETS = new double[] {.005,
+                                                                  .01,
+                                                                  .025,
+                                                                  .05,
+                                                                  .075,
+                                                                  .1,
+                                                                  .25,
+                                                                  .5,
+                                                                  .75,
+                                                                  1,
+                                                                  2.5,
+                                                                  5,
+                                                                  7.5,
+                                                                  10 };
 
     private Histogram histogram = null;
-
-    // Package-level for testing purposes.
-    int pathComponents = 1;
-    private String metricName = null;
-    private String help = "The time taken fulfilling servlet requests";
-    private double[] buckets = null;
-
-    public PrometheusServletFilter() {
-    }
-
-    public PrometheusServletFilter(final String metricName,
-                                   final String help,
-                                   final Integer pathComponents,
-                                   final double[] buckets)
-            throws ServletException {
-        this.metricName = metricName;
-        this.buckets = buckets;
-        if (help != null) {
-            this.help = help;
-        }
-        if (pathComponents != null) {
-            this.pathComponents = pathComponents;
-        }
-    }
-
-    private boolean isEmpty(final String s) {
-        return s == null || s.length() == 0;
-    }
-
-    private String getComponents(final String str) {
-        if (str == null || pathComponents < 1) {
-            return str;
-        }
-        int count = 0;
-        int i = -1;
-        do {
-            i = str.indexOf("/",
-                    i + 1);
-            if (i < 0) {
-                // Path is longer than specified pathComponents.
-                return str;
-            }
-            count++;
-        } while (count <= pathComponents);
-
-        return str.substring(0,
-                i);
-    }
+    private int pathComponents = 1;
 
     @Override
     public void init(final FilterConfig filterConfig) throws ServletException {
-        Histogram.Builder builder = Histogram.build()
-                .labelNames("path",
-                        "method");
+        this.histogram = Optional.ofNullable(filterConfig)
+                .map(this::buildHistogram)
+                .orElse(null);
 
-        if (filterConfig == null && isEmpty(metricName)) {
-            throw new ServletException("No configuration object provided, and no metricName passed via constructor");
-        }
-
-        if (filterConfig != null) {
-            if (isEmpty(metricName)) {
-                metricName = filterConfig.getInitParameter(METRIC_NAME_PARAM);
-                if (isEmpty(metricName)) {
-                    throw new ServletException("Init parameter \"" + METRIC_NAME_PARAM + "\" is required; please supply a value");
-                }
-            }
-
-            if (!isEmpty(filterConfig.getInitParameter(HELP_PARAM))) {
-                help = filterConfig.getInitParameter(HELP_PARAM);
-            }
-
-            // Allow overriding of the path "depth" to track
-            if (!isEmpty(filterConfig.getInitParameter(PATH_COMPONENT_PARAM))) {
-                pathComponents = Integer.valueOf(filterConfig.getInitParameter(PATH_COMPONENT_PARAM));
-            }
-
-            // Allow users to override the default bucket configuration
-            if (!isEmpty(filterConfig.getInitParameter(BUCKET_CONFIG_PARAM))) {
-                final String[] bucketParams = filterConfig.getInitParameter(BUCKET_CONFIG_PARAM)
-                        .split(",");
-                buckets = new double[bucketParams.length];
-
-                for (int i = 0; i < bucketParams.length; i++) {
-                    buckets[i] = Double.parseDouble(bucketParams[i]);
-                }
-            }
-        }
-
-        if (buckets != null) {
-            builder = builder.buckets(buckets);
-        }
-
-        histogram = builder.help(help)
-                .name(metricName)
-                .register();
+        this.pathComponents = Optional.ofNullable(filterConfig)
+                .map(p -> filterConfig.getInitParameter("help"))
+                .map(Integer::valueOf)
+                .orElse(1);
     }
 
     @Override
@@ -162,20 +92,14 @@ public class PrometheusServletFilter implements Filter {
                          final ServletResponse servletResponse,
                          final FilterChain filterChain)
             throws IOException, ServletException {
+
         if (!(servletRequest instanceof HttpServletRequest)) {
             filterChain.doFilter(servletRequest,
                     servletResponse);
             return;
         }
 
-        final HttpServletRequest request = (HttpServletRequest) servletRequest;
-
-        final String path = request.getRequestURI();
-
-        final Histogram.Timer timer = histogram.labels(getComponents(path),
-                request.getMethod())
-                .startTimer();
-
+        final Histogram.Timer timer = startTimer((HttpServletRequest) servletRequest);
         try {
             filterChain.doFilter(servletRequest,
                     servletResponse);
@@ -184,7 +108,47 @@ public class PrometheusServletFilter implements Filter {
         }
     }
 
+    private Histogram.Timer startTimer(final HttpServletRequest request) {
+        return histogram.labels(getComponents(request.getRequestURI(),
+                pathComponents),
+                request.getMethod())
+                .startTimer();
+    }
+
     @Override
     public void destroy() {
+    }
+
+    private Histogram buildHistogram(final FilterConfig filterConfig) {
+        return Histogram.build()
+                .labelNames("path",
+                        "method")
+                .name(Optional.ofNullable(filterConfig.getInitParameter("metric-name"))
+                        .orElse("http_metrics"))
+                .help(Optional.ofNullable(filterConfig.getInitParameter("help"))
+                        .orElse("The time taken fulfilling servlet requests"))
+                .buckets(Optional.ofNullable(filterConfig.getInitParameter("buckets"))
+                        .map(p -> parseBuckets(p))
+                        .orElse(DEFAULT_BUCKETS))
+                .register();
+    }
+
+    private double[] parseBuckets(final String buckets) {
+        return Arrays.stream(buckets.split(","))
+                .mapToDouble(Double::valueOf)
+                .toArray();
+    }
+
+    private String getComponents(final String str,
+                                 final int noOfComponents) {
+        return Optional.of(str)
+                .map(p -> Paths.get("/",
+                        p))
+                .filter(p -> (p.getNameCount() > noOfComponents))
+                .map(p -> p.subpath(0,
+                        noOfComponents))
+                .map(p -> p.toString())
+                .orElse(str);
+
     }
 }
