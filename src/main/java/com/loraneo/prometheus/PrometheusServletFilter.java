@@ -77,12 +77,8 @@ public class PrometheusServletFilter implements Filter {
 
     @Override
     public void init(final FilterConfig filterConfig) throws ServletException {
-        this.histogram = Optional.ofNullable(filterConfig)
-                .map(this::buildHistogram)
-                .orElse(null);
-
-        this.pathComponents = Optional.ofNullable(filterConfig)
-                .map(p -> filterConfig.getInitParameter("help"))
+        this.histogram = buildHistogram(filterConfig);
+        this.pathComponents = Optional.ofNullable(filterConfig.getInitParameter("path-components"))
                 .map(Integer::valueOf)
                 .orElse(1);
     }
@@ -99,7 +95,8 @@ public class PrometheusServletFilter implements Filter {
             return;
         }
 
-        final Histogram.Timer timer = startTimer((HttpServletRequest) servletRequest);
+        final Histogram.Timer timer = startTimer(getLabels((HttpServletRequest) servletRequest,
+                pathComponents));
         try {
             filterChain.doFilter(servletRequest,
                     servletResponse);
@@ -108,15 +105,13 @@ public class PrometheusServletFilter implements Filter {
         }
     }
 
-    private Histogram.Timer startTimer(final HttpServletRequest request) {
-        return histogram.labels(getComponents(request.getRequestURI(),
-                pathComponents),
-                request.getMethod())
-                .startTimer();
-    }
-
     @Override
     public void destroy() {
+    }
+
+    private Histogram.Timer startTimer(final String[] labels) {
+        return histogram.labels(labels)
+                .startTimer();
     }
 
     private Histogram buildHistogram(final FilterConfig filterConfig) {
@@ -137,6 +132,16 @@ public class PrometheusServletFilter implements Filter {
         return Arrays.stream(buckets.split(","))
                 .mapToDouble(Double::valueOf)
                 .toArray();
+    }
+
+    private String[] getLabels(final HttpServletRequest servletRequest,
+                               final int noOfComponents) {
+
+        return new String[] {getComponents(servletRequest.getRequestURL()
+                .toString(),
+                noOfComponents),
+                             servletRequest.getMethod() };
+
     }
 
     private String getComponents(final String str,
